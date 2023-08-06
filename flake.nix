@@ -129,6 +129,14 @@
 
           # buck2 related tools and trinkets
           buck2 reindeer clang_16 lld_16
+
+          (pkgs.runCommand "update-buck2-prelude" {} ''
+            mkdir -p $out/bin
+            substitute ${buck/update-prelude.sh.in} $out/bin/update-buck2-prelude \
+              --subst-var-by BUCK2_VERSION ${pkgs.lib.removePrefix "unstable-" buck2.version}
+            patchShebangs $out/bin/update-buck2-prelude
+            chmod +x $out/bin/update-buck2-prelude
+          '')
         ];
 
         shellHook = ''
