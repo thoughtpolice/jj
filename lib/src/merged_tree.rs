@@ -820,7 +820,7 @@ enum TreeDiffItem {
     // This is used for making sure that when a directory gets replaced by a file, we
     // yield the value for the addition of the file after we yield the values
     // for removing files in the directory.
-    File(RepoPath, MergedTreeValue, MergedTreeValue),
+    File(Box<RepoPath>, MergedTreeValue, MergedTreeValue),
 }
 
 impl<'matcher> TreeDiffIterator<'matcher> {
@@ -903,7 +903,7 @@ impl Iterator for TreeDiffIterator<'_> {
                 }
                 TreeDiffItem::File(..) => {
                     if let TreeDiffItem::File(name, before, after) = self.stack.pop().unwrap() {
-                        return Some((name, Ok((before, after))));
+                        return Some((*name, Ok((before, after))));
                     } else {
                         unreachable!();
                     }
@@ -948,7 +948,7 @@ impl Iterator for TreeDiffIterator<'_> {
                     if after.is_present() {
                         self.stack.insert(
                             post_subdir,
-                            TreeDiffItem::File(path, Merge::absent(), after),
+                            TreeDiffItem::File(Box::new(path), Merge::absent(), after),
                         );
                     }
                 } else if !tree_before && !tree_after {
