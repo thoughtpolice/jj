@@ -15,8 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### New features
 
 * Information about new and resolved conflicts is now printed by every command.
+
 * `jj branch` has gained a new `rename` subcommand that allows changing a branch
   name atomically. `jj branch help rename` for details.
+
+* Git repositories created with `jj git clone` or `jj init --git` can now be
+  automatically colocated on creation with the setting `git.colocate = true`.
+  The default is `false`.
 
 ### Fixed bugs
 

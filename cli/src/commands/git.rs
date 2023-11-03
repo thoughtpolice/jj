@@ -122,9 +122,17 @@ pub struct GitCloneArgs {
     /// The directory to write the Jujutsu repo to
     #[arg(value_hint = clap::ValueHint::DirPath)]
     destination: Option<String>,
-    /// Whether or not to colocate the Jujutsu repo with the git repo
+
+    /// Colocate the Jujutsu repository with the Git repository.
     #[arg(long)]
     colocate: bool,
+
+    /// Do not colocate the Jujutsu repository with the Git repository. Mostly
+    /// useful when `git.colocate` is set to `true` for your user.
+    #[arg(long)]
+    // XXX (aseipp): apparently implicit negation flags do not exist yet, so we
+    // need this; see https://github.com/clap-rs/clap/issues/815
+    no_colocate: bool,
 }
 
 /// Push to a Git remote
@@ -464,6 +472,16 @@ fn cmd_git_clone(
         ));
     }
 
+    let colocate = if command.settings().git_settings().colocate {
+        // the user may have set `git.colocate` to `true` in their config, but
+        // they may still want to override it with `--no-colocate`
+        !args.no_colocate
+    } else {
+        // --no-colocate always overrides --colocate for consistency, since we
+        // don't want the option to only apply when `git.colocate = true`
+        args.colocate && !args.no_colocate
+    };
+
     // Canonicalize because fs::remove_dir_all() doesn't seem to like e.g.
     // `/some/path/.`
     let canonical_wc_path: PathBuf = wc_path
@@ -472,7 +490,7 @@ fn cmd_git_clone(
     let clone_result = do_git_clone(
         ui,
         command,
-        args.colocate,
+        colocate,
         remote_name,
         &source,
         &canonical_wc_path,
@@ -480,7 +498,7 @@ fn cmd_git_clone(
     if clone_result.is_err() {
         let clean_up_dirs = || -> io::Result<()> {
             fs::remove_dir_all(canonical_wc_path.join(".jj"))?;
-            if args.colocate {
+            if colocate {
                 fs::remove_dir_all(canonical_wc_path.join(".git"))?;
             }
             if !wc_path_existed {

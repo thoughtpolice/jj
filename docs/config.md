@@ -547,6 +547,20 @@ example:
 
     git.push-branch-prefix = "martinvonz/push-"
 
+### Automatically colocate Git-backed repositories
+
+`jj init` does not create a colocated Git repository by default, and neither
+does `jj git clone`. You must pass the `--git` or `--colocate` flags to each
+command, respectively. If you want to change this behavior and have all
+Git-backed repositories automatically become colocated:
+
+```
+git.colocate = true
+```
+
+This can be useful to ensure e.g. Git-based tooling will always work in your jj
+repositories.
+
 ## Filesystem monitor
 
 In large repositories, it may be beneficial to use a "filesystem monitor" to

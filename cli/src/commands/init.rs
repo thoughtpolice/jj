@@ -68,6 +68,12 @@ pub(crate) fn cmd_init(
     let cwd = command.cwd().canonicalize().unwrap();
     let relative_wc_path = file_util::relative_path(&cwd, &wc_path);
 
+    let colocate = if command.settings().git_settings().colocate {
+        true
+    } else {
+        args.git
+    };
+
     if let Some(git_store_str) = &args.git_repo {
         let mut git_store_path = command.cwd().join(git_store_str);
         git_store_path = git_store_path
@@ -112,7 +118,6 @@ pub(crate) fn cmd_init(
                 ),
             ));
         }
-
         Workspace::init_internal_git(command.settings(), &wc_path)?;
     } else {
         if !command.settings().allow_native_backend() {
