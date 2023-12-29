@@ -43,6 +43,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends xz-utils liblz4-tool musl-tools
+        sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
     - name: Install Rust
       uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8
       with:
