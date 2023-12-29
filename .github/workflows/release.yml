@@ -43,6 +43,10 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends xz-utils liblz4-tool musl-tools
+        # Look into:
+        # https://github.com/cross-rs/cross
+        # https://unix.stackexchange.com/questions/619233/how-to-get-aarch64-version-of-musl-on-debian-for-qemu-user-mode
+        # https://jensd.be/1126/linux/cross-compiling-for-arm-or-aarch64-on-debian-or-ubuntu
         sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
     - name: Install Rust
       uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8
