@@ -73,6 +73,13 @@ jobs:
         asset_path: ${{ env.ASSET }}
         asset_name: ${{ env.ASSET }}
         asset_content_type: application/octet-stream
+    - name: Upload DotSlash files
+      uses: facebook/dotslash-publish-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        config: .github/workflows/dotslash-config.json
+        tag: ${{ github.event.release.tag_name }}
 
   docs-release-archive:
     runs-on: ubuntu-latest

@@ -1,0 +1,20 @@
+{
+    "outputs": {
+        "buck2": {
+            "platforms": {
+                "linux-x86_64": {
+                    "regex": "^jj-(.*)-x86_64-unknown-linux-musl\\.tar\\.gz$",
+                    "path": "jj"
+                },
+                "macos-aarch64": {
+                    "regex": "^jj-(.*)-aarch64-apple-darwin\\.tar\\.gz$",
+                    "path": "jj"
+                },
+                "macos-x86_64": {
+                    "regex": "^jj-(.*)-x86_64-apple-darwin\\.tar\\.gz$",
+                    "path": "jj"
+                }
+            }
+        }
+    }
+}
