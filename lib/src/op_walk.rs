@@ -20,8 +20,11 @@ use std::collections::HashSet;
 use std::slice;
 use std::sync::Arc;
 
+use futures::Stream;
+use futures::StreamExt as _;
+use futures::TryStreamExt as _;
+use futures::stream;
 use itertools::Itertools as _;
-use pollster::FutureExt as _;
 use thiserror::Error;
 
 use crate::dag_walk;
@@ -86,42 +89,43 @@ pub enum OpsetResolutionError {
 }
 
 /// Resolves operation set expression without loading a repo.
-pub fn resolve_op_for_load(
+pub async fn resolve_op_for_load(
     repo_loader: &RepoLoader,
     op_str: &str,
 ) -> Result<Operation, OpsetEvaluationError> {
     let op_store = repo_loader.op_store();
     let op_heads_store = repo_loader.op_heads_store().as_ref();
-    let get_current_op = || {
-        op_heads_store::resolve_op_heads(op_heads_store, op_store, |op_heads| {
+    let get_current_op = || async {
+        op_heads_store::resolve_op_heads(op_heads_store, op_store, |op_heads| async move {
             Err(OpsetResolutionError::MultipleOperations {
                 expr: "@".to_owned(),
                 candidates: op_heads.iter().map(|op| op.id().clone()).collect(),
             }
             .into())
         })
+        .await
     };
-    let get_head_ops = || get_current_head_ops(op_store, op_heads_store);
-    resolve_single_op(op_store, get_current_op, get_head_ops, op_str)
+    let get_head_ops = async || get_current_head_ops(op_store, op_heads_store).await;
+    resolve_single_op(op_store, get_current_op, get_head_ops, op_str).await
 }
 
 /// Resolves operation set expression against the loaded repo.
 ///
 /// The "@" symbol will be resolved to the operation the repo was loaded at.
-pub fn resolve_op_with_repo(
+pub async fn resolve_op_with_repo(
     repo: &ReadonlyRepo,
     op_str: &str,
 ) -> Result<Operation, OpsetEvaluationError> {
-    resolve_op_at(repo.op_store(), slice::from_ref(repo.operation()), op_str)
+    resolve_op_at(repo.op_store(), slice::from_ref(repo.operation()), op_str).await
 }
 
 /// Resolves operation set expression at the given head operations.
-pub fn resolve_op_at(
+pub async fn resolve_op_at(
     op_store: &Arc<dyn OpStore>,
     head_ops: &[Operation],
     op_str: &str,
 ) -> Result<Operation, OpsetEvaluationError> {
-    let get_current_op = || match head_ops {
+    let get_current_op = async || match head_ops {
         [head_op] => Ok(head_op.clone()),
         [] => Err(OpsetResolutionError::EmptyOperations("@".to_owned()).into()),
         _ => Err(OpsetResolutionError::MultipleOperations {
@@ -130,29 +134,33 @@ pub fn resolve_op_at(
         }
         .into()),
     };
-    let get_head_ops = || Ok(head_ops.to_vec());
-    resolve_single_op(op_store, get_current_op, get_head_ops, op_str)
+    let get_head_ops = async || Ok(head_ops.to_vec());
+    resolve_single_op(op_store, get_current_op, get_head_ops, op_str).await
 }
 
 /// Resolves operation set expression with the given "@" symbol resolution
 /// callbacks.
-fn resolve_single_op(
+async fn resolve_single_op(
     op_store: &Arc<dyn OpStore>,
-    get_current_op: impl FnOnce() -> Result<Operation, OpsetEvaluationError>,
-    get_head_ops: impl FnOnce() -> Result<Vec<Operation>, OpsetEvaluationError>,
+    get_current_op: impl AsyncFnOnce() -> Result<Operation, OpsetEvaluationError>,
+    get_head_ops: impl AsyncFnOnce() -> Result<Vec<Operation>, OpsetEvaluationError>,
     op_str: &str,
 ) -> Result<Operation, OpsetEvaluationError> {
     let op_symbol = op_str.trim_end_matches(['-', '+']);
     let op_postfix = &op_str[op_symbol.len()..];
-    let head_ops = op_postfix.contains('+').then(get_head_ops).transpose()?;
+    let head_ops: Option<Vec<Operation>> = if op_postfix.contains('+') {
+        Some(get_head_ops().await?)
+    } else {
+        None
+    };
     let mut operation = match op_symbol {
-        "@" => get_current_op(),
-        s => resolve_single_op_from_store(op_store, s),
+        "@" => get_current_op().await,
+        s => resolve_single_op_from_store(op_store, s).await,
     }?;
     for (i, c) in op_postfix.chars().enumerate() {
         let mut neighbor_ops = match c {
             '-' => operation.parents().try_collect()?,
-            '+' => find_child_ops(head_ops.as_ref().unwrap(), operation.id())?,
+            '+' => find_child_ops(head_ops.as_ref().unwrap(), operation.id()).await?,
             _ => unreachable!(),
         };
         operation = match neighbor_ops.len() {
@@ -177,7 +185,7 @@ fn resolve_single_op(
     Ok(operation)
 }
 
-fn resolve_single_op_from_store(
+async fn resolve_single_op_from_store(
     op_store: &Arc<dyn OpStore>,
     op_str: &str,
 ) -> Result<Operation, OpsetEvaluationError> {
@@ -186,12 +194,12 @@ fn resolve_single_op_from_store(
     }
     let prefix = HexPrefix::try_from_hex(op_str)
         .ok_or_else(|| OpsetResolutionError::InvalidIdPrefix(op_str.to_owned()))?;
-    match op_store.resolve_operation_id_prefix(&prefix).block_on()? {
+    match op_store.resolve_operation_id_prefix(&prefix).await? {
         PrefixResolution::NoMatch => {
             Err(OpsetResolutionError::NoSuchOperation(op_str.to_owned()).into())
         }
         PrefixResolution::SingleMatch(op_id) => {
-            let data = op_store.read_operation(&op_id).block_on()?;
+            let data = op_store.read_operation(&op_id).await?;
             Ok(Operation::new(op_store.clone(), op_id, data))
         }
         PrefixResolution::AmbiguousMatch => {
@@ -202,19 +210,18 @@ fn resolve_single_op_from_store(
 
 /// Loads the current head operations. The returned operations may contain
 /// redundant ones which are ancestors of the other heads.
-pub fn get_current_head_ops(
+pub async fn get_current_head_ops(
     op_store: &Arc<dyn OpStore>,
     op_heads_store: &dyn OpHeadsStore,
 ) -> Result<Vec<Operation>, OpsetEvaluationError> {
-    let mut head_ops: Vec<_> = op_heads_store
-        .get_op_heads()
-        .block_on()?
-        .into_iter()
-        .map(|id| -> OpStoreResult<Operation> {
-            let data = op_store.read_operation(&id).block_on()?;
-            Ok(Operation::new(op_store.clone(), id, data))
-        })
-        .try_collect()?;
+    let op_ids = op_heads_store.get_op_heads().await?;
+
+    let mut head_ops = Vec::with_capacity(op_ids.len());
+    for id in op_ids {
+        let data = op_store.read_operation(&id).await?;
+        head_ops.push(Operation::new(op_store.clone(), id, data));
+    }
+
     // To stabilize output, sort in the same order as resolve_op_heads()
     head_ops.sort_by_key(|op| op.metadata().time.end.timestamp);
     Ok(head_ops)
@@ -224,14 +231,27 @@ pub fn get_current_head_ops(
 ///
 /// This will be slow if the `root_op_id` is far away (or unreachable) from the
 /// `head_ops`.
-fn find_child_ops(
+async fn find_child_ops(
     head_ops: &[Operation],
     root_op_id: &OperationId,
 ) -> OpStoreResult<Vec<Operation>> {
-    walk_ancestors(head_ops)
-        .take_while(|res| res.as_ref().map_or(true, |op| op.id() != root_op_id))
-        .filter_ok(|op| op.parent_ids().iter().any(|id| id == root_op_id))
-        .try_collect()
+    let mut walk_ancestors_stream = walk_ancestors(head_ops).await;
+    let mut accum = vec![];
+    'b: while let Some(ancestor_res) = walk_ancestors_stream.next().await {
+        let take = ancestor_res
+            .as_ref()
+            .map_or(true, |op| op.id() != root_op_id);
+        if take {
+            if let Ok(op) = ancestor_res {
+                if op.parent_ids().iter().any(|id| id == root_op_id) {
+                    accum.push(op);
+                }
+            }
+        } else {
+            break 'b;
+        }
+    }
+    Ok(accum)
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -254,9 +274,9 @@ impl PartialOrd for OperationByEndTime {
 }
 
 /// Walks `head_ops` and their ancestors in reverse topological order.
-pub fn walk_ancestors(
+pub async fn walk_ancestors(
     head_ops: &[Operation],
-) -> impl Iterator<Item = OpStoreResult<Operation>> + use<> {
+) -> impl Stream<Item = OpStoreResult<Operation>> + use<> {
     let head_ops = head_ops
         .iter()
         .cloned()
@@ -267,18 +287,22 @@ pub fn walk_ancestors(
     dag_walk::topo_order_reverse_lazy_ok(
         head_ops.into_iter().map(Ok),
         |OperationByEndTime(op)| op.id().clone(),
-        |OperationByEndTime(op)| op.parents().map_ok(OperationByEndTime).collect_vec(),
+        |OperationByEndTime(op)| {
+            let op = op.clone();
+            async move { op.parents().map_ok(OperationByEndTime).collect_vec() }
+        },
         |_| panic!("graph has cycle"),
     )
+    .await
     .map_ok(|OperationByEndTime(op)| op)
 }
 
 /// Walks ancestors from `head_ops` in reverse topological order, excluding
 /// ancestors of `root_ops`.
-pub fn walk_ancestors_range(
+pub async fn walk_ancestors_range(
     head_ops: &[Operation],
     root_ops: &[Operation],
-) -> impl Iterator<Item = OpStoreResult<Operation>> + use<> {
+) -> impl Stream<Item = OpStoreResult<Operation>> {
     let mut start_ops = itertools::chain(head_ops, root_ops)
         .cloned()
         .map(OperationByEndTime)
@@ -289,31 +313,40 @@ pub fn walk_ancestors_range(
         vec![]
     } else {
         let unwanted_ids = root_ops.iter().map(|op| op.id().clone()).collect();
-        collect_ancestors_until_roots(&mut start_ops, unwanted_ids)
+        collect_ancestors_until_roots(&mut start_ops, unwanted_ids).await
     };
 
     // Lazily load operations based on timestamp-based heuristic. This works so long
     // as the operation history is mostly linear.
-    let trailing_iter = dag_walk::topo_order_reverse_lazy_ok(
+    let trailing_stream = dag_walk::topo_order_reverse_lazy_ok(
         start_ops.into_iter().map(Ok),
         |OperationByEndTime(op)| op.id().clone(),
-        |OperationByEndTime(op)| op.parents().map_ok(OperationByEndTime).collect_vec(),
+        |OperationByEndTime(op)| {
+            let op = op.clone();
+            async move { op.parents().map_ok(OperationByEndTime).collect_vec() }
+        },
         |_| panic!("graph has cycle"),
     )
+    .await
     .map_ok(|OperationByEndTime(op)| op);
-    itertools::chain(leading_items, trailing_iter)
+    stream::iter(leading_items.into_iter()).chain(trailing_stream)
 }
 
-fn collect_ancestors_until_roots(
+async fn collect_ancestors_until_roots(
     start_ops: &mut Vec<OperationByEndTime>,
     mut unwanted_ids: HashSet<OperationId>,
 ) -> Vec<OpStoreResult<Operation>> {
     let sorted_ops = match dag_walk::topo_order_reverse_chunked(
         start_ops,
         |OperationByEndTime(op)| op.id().clone(),
-        |OperationByEndTime(op)| op.parents().map_ok(OperationByEndTime).collect_vec(),
+        |OperationByEndTime(op)| {
+            let op = op.clone();
+            async move { op.parents().map_ok(OperationByEndTime).collect_vec() }
+        },
         |_| panic!("graph has cycle"),
-    ) {
+    )
+    .await
+    {
         Ok(sorted_ops) => sorted_ops,
         Err(err) => return vec![Err(err)],
     };
@@ -351,14 +384,22 @@ pub struct ReparentStats {
 /// If the source operation range `root_ops..head_ops` was empty, the
 /// `new_head_ids` will be `[dest_op.id()]`, meaning the `dest_op` is the head.
 // TODO: Find better place to host this function. It might be an OpStore method.
-pub fn reparent_range(
+pub async fn reparent_range(
     op_store: &dyn OpStore,
     root_ops: &[Operation],
     head_ops: &[Operation],
     dest_op: &Operation,
 ) -> OpStoreResult<ReparentStats> {
-    let ops_to_reparent: Vec<_> = walk_ancestors_range(head_ops, root_ops).try_collect()?;
+    let ops_to_reparent: Vec<_> = walk_ancestors_range(head_ops, root_ops)
+        .await
+        .try_collect()
+        .await?;
+
     let unreachable_count = walk_ancestors_range(root_ops, slice::from_ref(dest_op))
+        .await
+        .collect::<Vec<OpStoreResult<_>>>()
+        .await
+        .into_iter()
         .process_results(|iter| iter.count())?;
 
     assert!(
@@ -377,7 +418,7 @@ pub fn reparent_range(
             .filter_map(|id| rewritten_ids.get(id).or_else(|| dest_once.take()))
             .cloned()
             .collect();
-        let new_id = op_store.write_operation(&data).block_on()?;
+        let new_id = op_store.write_operation(&data).await?;
         rewritten_ids.insert(old_op.id().clone(), new_id);
     }
 

@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use pollster::FutureExt as _;
+use pollster::FutureExt;
 
 use crate::backend;
 use crate::backend::BackendError;
@@ -84,8 +84,8 @@ impl CommitBuilder<'_> {
     }
 
     /// [`Commit::is_empty()`] for the new commit.
-    pub fn is_empty(&self) -> BackendResult<bool> {
-        self.inner.is_empty(self.mut_repo)
+    pub async fn is_empty(&self) -> BackendResult<bool> {
+        self.inner.is_empty(self.mut_repo).await
     }
 
     pub fn change_id(&self) -> &ChangeId {
@@ -130,8 +130,8 @@ impl CommitBuilder<'_> {
     }
 
     /// [`Commit::is_discardable()`] for the new commit.
-    pub fn is_discardable(&self) -> BackendResult<bool> {
-        self.inner.is_discardable(self.mut_repo)
+    pub async fn is_discardable(&self) -> BackendResult<bool> {
+        self.inner.is_discardable(self.mut_repo).await
     }
 
     pub fn sign_settings(&self) -> &SignSettings {
@@ -153,8 +153,8 @@ impl CommitBuilder<'_> {
         self
     }
 
-    pub fn write(self) -> BackendResult<Commit> {
-        self.inner.write(self.mut_repo)
+    pub async fn write(self) -> BackendResult<Commit> {
+        self.inner.write(self.mut_repo).await
     }
 
     /// Records the old commit as abandoned instead of writing new commit. This
@@ -242,7 +242,10 @@ impl DetachedCommitBuilder {
         // with no description in our repo, we'd like to be extra safe.
         if commit.author.name == commit.committer.name
             && commit.author.email == commit.committer.email
-            && predecessor.is_discardable(repo).unwrap_or_default()
+            && predecessor
+                .is_discardable(repo)
+                .block_on()
+                .unwrap_or_default()
         {
             commit.author.timestamp = commit.committer.timestamp;
         }
@@ -306,8 +309,8 @@ impl DetachedCommitBuilder {
     }
 
     /// [`Commit::is_empty()`] for the new commit.
-    pub fn is_empty(&self, repo: &dyn Repo) -> BackendResult<bool> {
-        is_backend_commit_empty(repo, &self.store, &self.commit)
+    pub async fn is_empty(&self, repo: &dyn Repo) -> BackendResult<bool> {
+        is_backend_commit_empty(repo, &self.store, &self.commit).await
     }
 
     pub fn change_id(&self) -> &ChangeId {
@@ -352,8 +355,8 @@ impl DetachedCommitBuilder {
     }
 
     /// [`Commit::is_discardable()`] for the new commit.
-    pub fn is_discardable(&self, repo: &dyn Repo) -> BackendResult<bool> {
-        Ok(self.description().is_empty() && self.is_empty(repo)?)
+    pub async fn is_discardable(&self, repo: &dyn Repo) -> BackendResult<bool> {
+        Ok(self.description().is_empty() && self.is_empty(repo).await?)
     }
 
     pub fn sign_settings(&self) -> &SignSettings {
@@ -376,11 +379,11 @@ impl DetachedCommitBuilder {
     }
 
     /// Writes new commit and makes it visible in the `mut_repo`.
-    pub fn write(mut self, mut_repo: &mut MutableRepo) -> BackendResult<Commit> {
+    pub async fn write(mut self, mut_repo: &mut MutableRepo) -> BackendResult<Commit> {
         if self.record_predecessors_in_commit {
             self.commit.predecessors = self.predecessors.clone();
         }
-        let commit = write_to_store(&self.store, self.commit, &self.sign_settings)?;
+        let commit = write_to_store(&self.store, self.commit, &self.sign_settings).await?;
         // FIXME: Google's index.has_id() always returns true.
         if mut_repo.is_backed_by_default_index()
             && mut_repo
@@ -396,7 +399,7 @@ impl DetachedCommitBuilder {
                 format!("Newly-created commit {id} already exists", id = commit.id()).into(),
             ));
         }
-        mut_repo.add_head(&commit)?;
+        mut_repo.add_head(&commit).await?;
         mut_repo.set_predecessors(commit.id().clone(), self.predecessors);
         if let Some(rewrite_source) = self.rewrite_source {
             mut_repo.set_rewritten_commit(rewrite_source.id().clone(), commit.id().clone());
@@ -408,12 +411,12 @@ impl DetachedCommitBuilder {
     ///
     /// This does not consume the builder, so you can reuse the current
     /// configuration to create another commit later.
-    pub fn write_hidden(&self) -> BackendResult<Commit> {
+    pub async fn write_hidden(&self) -> BackendResult<Commit> {
         let mut commit = self.commit.clone();
         if self.record_predecessors_in_commit {
             commit.predecessors = self.predecessors.clone();
         }
-        write_to_store(&self.store, commit, &self.sign_settings)
+        write_to_store(&self.store, commit, &self.sign_settings).await
     }
 
     /// Records the old commit as abandoned in the `mut_repo`.
@@ -429,7 +432,7 @@ impl DetachedCommitBuilder {
     }
 }
 
-fn write_to_store(
+async fn write_to_store(
     store: &Arc<Store>,
     mut commit: backend::Commit,
     sign_settings: &SignSettings,
@@ -444,5 +447,5 @@ fn write_to_store(
 
     store
         .write_commit(commit, should_sign.then_some(&mut &sign_fn))
-        .block_on()
+        .await
 }
