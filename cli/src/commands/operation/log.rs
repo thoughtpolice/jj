@@ -15,6 +15,7 @@
 use std::slice;
 
 use clap_complete::ArgValueCandidates;
+use futures::StreamExt as _;
 use itertools::Itertools as _;
 use jj_lib::graph::GraphEdge;
 use jj_lib::graph::reverse_graph;
@@ -22,6 +23,7 @@ use jj_lib::op_store::OpStoreError;
 use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use jj_lib::repo::RepoLoader;
+use pollster::FutureExt as _;
 
 use super::diff::show_op_diff;
 use crate::cli_util::CommandHelper;
@@ -151,9 +153,11 @@ fn do_op_log(
                          op: &Operation,
                          with_content_format: &LogContentFormat| {
             let parent_ops: Vec<_> = op.parents().try_collect()?;
-            let merged_parent_op = repo_loader.merge_operations(parent_ops.clone(), None)?;
-            let parent_repo = repo_loader.load_at(&merged_parent_op)?;
-            let repo = repo_loader.load_at(op)?;
+            let merged_parent_op = repo_loader
+                .merge_operations(parent_ops.clone(), None)
+                .block_on()?;
+            let parent_repo = repo_loader.load_at(&merged_parent_op).block_on()?;
+            let repo = repo_loader.load_at(op).block_on()?;
 
             let id_prefix_context = workspace_env.new_id_prefix_context();
             let commit_summary_template = {
@@ -199,8 +203,12 @@ fn do_op_log(
     ui.request_pager();
     let mut formatter = ui.stdout_formatter();
     let formatter = formatter.as_mut();
-    let iter =
-        op_walk::walk_ancestors(slice::from_ref(current_op)).take(args.limit.unwrap_or(usize::MAX));
+    let iter = op_walk::walk_ancestors(slice::from_ref(current_op))
+        .block_on()
+        .take(args.limit.unwrap_or(usize::MAX))
+        .collect::<Vec<_>>()
+        .block_on()
+        .into_iter();
 
     if !args.no_graph {
         let mut raw_output = formatter.raw()?;

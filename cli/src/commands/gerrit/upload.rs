@@ -31,6 +31,7 @@ use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
 use jj_lib::trailer::Trailer;
 use jj_lib::trailer::parse_description_trailers;
+use pollster::FutureExt as _;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
@@ -219,7 +220,7 @@ pub fn cmd_gerrit_upload(
 
     // Immediately error and reject any commits that shouldn't be uploaded.
     for commit in &to_upload {
-        if commit.is_empty(tx.repo_mut())? {
+        if commit.is_empty(tx.repo_mut()).block_on()? {
             return Err(user_error_with_hint(
                 format!(
                     "Refusing to upload revision {} because it is empty",
@@ -308,7 +309,8 @@ pub fn cmd_gerrit_upload(
             // two patchsets with the only difference being the timestamp.
             .set_committer(original_commit.committer().clone())
             .set_author(original_commit.author().clone())
-            .write()?;
+            .write()
+            .block_on()?;
 
         old_to_new.insert(original_commit.id().clone(), new_commit);
     }

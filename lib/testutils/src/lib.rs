@@ -56,8 +56,6 @@ use jj_lib::repo::StoreFactories;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::repo_path::RepoPathComponent;
-use jj_lib::rewrite::RebaseOptions;
-use jj_lib::rewrite::RebasedCommit;
 use jj_lib::secret_backend::SecretBackend;
 use jj_lib::settings::UserSettings;
 use jj_lib::signing::Signer;
@@ -197,6 +195,7 @@ impl TestEnvironment {
         RepoLoader::init_from_file_system(settings, repo_path, &self.default_store_factories())
             .unwrap()
             .load_at_head()
+            .block_on()
             .unwrap()
     }
 }
@@ -261,6 +260,7 @@ impl TestRepo {
             ReadonlyRepo::default_index_store_initializer(),
             ReadonlyRepo::default_submodule_store_initializer(),
         )
+        .block_on()
         .unwrap();
 
         Self {
@@ -360,10 +360,10 @@ pub fn commit_transactions(txs: Vec<Transaction>) -> Arc<ReadonlyRepo> {
     let repo_loader = txs[0].base_repo().loader().clone();
     let mut op_ids = vec![];
     for tx in txs {
-        op_ids.push(tx.commit("test").unwrap().op_id().clone());
+        op_ids.push(tx.commit("test").block_on().unwrap().op_id().clone());
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    let repo = repo_loader.load_at_head().unwrap();
+    let repo = repo_loader.load_at_head().block_on().unwrap();
     // Test the setup. The assumption here is that the parent order matches the
     // order in which they were merged (which currently matches the transaction
     // commit order), so we want to know make sure they appear in a certain
@@ -438,7 +438,7 @@ impl TestTreeBuilder {
     }
 
     pub fn write_single_tree(self) -> Tree {
-        let id = self.tree_builder.write_tree().unwrap();
+        let id = self.tree_builder.write_tree().block_on().unwrap();
         self.store.get_tree(RepoPathBuf::root(), &id).unwrap()
     }
 
@@ -625,6 +625,7 @@ pub fn write_random_commit_with_parents(mut_repo: &mut MutableRepo, parents: &[&
     create_random_commit(mut_repo)
         .set_parents(parents.iter().map(|commit| commit.id().clone()).collect())
         .write()
+        .block_on()
         .unwrap()
 }
 
@@ -640,25 +641,6 @@ pub fn write_working_copy_file(workspace_root: &Path, path: &RepoPath, contents:
         .open(path)
         .unwrap();
     file.write_all(contents.as_ref()).unwrap();
-}
-
-/// Rebase descendants of the rewritten commits. Returns map of original commit
-/// ID to rebased (or abandoned parent) commit ID.
-pub fn rebase_descendants_with_options_return_map(
-    repo: &mut MutableRepo,
-    options: &RebaseOptions,
-) -> HashMap<CommitId, CommitId> {
-    let mut rebased: HashMap<CommitId, CommitId> = HashMap::new();
-    repo.rebase_descendants_with_options(options, |old_commit, rebased_commit| {
-        let old_commit_id = old_commit.id().clone();
-        let new_commit_id = match rebased_commit {
-            RebasedCommit::Rewritten(new_commit) => new_commit.id().clone(),
-            RebasedCommit::Abandoned { parent_id } => parent_id,
-        };
-        rebased.insert(old_commit_id, new_commit_id);
-    })
-    .unwrap();
-    rebased
 }
 
 fn assert_in_rebased_map(

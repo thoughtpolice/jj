@@ -135,7 +135,7 @@ pub(crate) fn cmd_evolog(
     let formatter = formatter.as_mut();
 
     let repo = workspace_command.repo();
-    let evolution_entries = walk_predecessors(repo, &start_commit_ids);
+    let evolution_entries = walk_predecessors(repo, &start_commit_ids).block_on();
     if !args.no_graph {
         let mut raw_output = formatter.raw()?;
         let mut graph = get_graphlog(graph_style, raw_output.as_mut());
