@@ -1,0 +1,206 @@
+# Every night (and on manual trigger) this builds release binaries for the tip of
+# upstream jj-vcs/jj on every platform, and publishes them to THIS repository as a
+# GitHub prerelease together with a DotSlash file (https://dotslash-cli.com) that
+# fetches the right binary per platform. The source is always upstream jj-vcs/jj;
+# this fork is only the place the artifacts are published.
+#
+# This is intended to run on the fork github.com/thoughtpolice/jj. The scheduled
+# build is guarded so it only runs there (see the `if:` on the `create-release`
+# job); manual `workflow_dispatch` runs are allowed on any fork. To run it
+# somewhere else, change the repository name in that guard.
+name: nightly-dotslash
+
+on:
+  schedule:
+    # 00:00 UTC every day. GitHub cron is always UTC.
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+# Never let two nightly runs (e.g. the cron and a manual trigger) race on the
+# same tag/release. A new run waits for the in-flight one to finish.
+concurrency:
+  group: nightly-dotslash
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  create-release:
+    name: Create nightly release
+    # Only build nightlies automatically on the fork; allow manual runs anywhere.
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'thoughtpolice/jj'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - name: Resolve upstream main
+        id: meta
+        shell: bash
+        env:
+          UPSTREAM: https://github.com/jj-vcs/jj.git
+        run: |
+          # Nightlies track upstream jj-vcs/jj, not this fork. Resolve the exact
+          # commit at the tip of upstream main; that is what gets built. This asks
+          # the remote for one ref, so no checkout and no clone is needed here;
+          # build-release checks the commit out from jj-vcs/jj itself.
+          sha=$(git ls-remote --exit-code "$UPSTREAM" refs/heads/main | cut -f1)
+          short_sha=${sha:0:8}
+          tag="nightly-$(date -u +%Y%m%d)-${short_sha}"
+          {
+            echo "tag=${tag}"
+            echo "sha=${sha}"
+            echo "date=$(date -u +%Y-%m-%d)"
+            echo "short_sha=${short_sha}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          DATE: ${{ steps.meta.outputs.date }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+        shell: bash
+        run: |
+          # Idempotent for same-day re-runs: drop any existing release for this
+          # tag, then recreate it below. --cleanup-tag is omitted so an existing
+          # tag is reused; a first run creates the tag from --target.
+          gh release delete "$TAG" --yes || true
+
+          printf '%s\n' \
+            "Automated nightly build of jj from upstream [jj-vcs/jj@${SHORT_SHA}](https://github.com/jj-vcs/jj/commit/${SHA})." \
+            "" \
+            "> [!WARNING]" \
+            "> These are unsigned, minimally-tested prerelease binaries built from the tip of upstream jj-vcs/jj main. Not intended for production use." \
+            "" \
+            "## Installation via DotSlash" \
+            "" \
+            "A [DotSlash](https://dotslash-cli.com) file named \"jj\" is attached to this release. With DotSlash installed, fetch it once and it will download, verify, and cache the correct binary for your platform:" \
+            "" \
+            '```sh' \
+            "curl -fLo jj https://github.com/${GH_REPO}/releases/download/${TAG}/jj" \
+            "chmod +x jj" \
+            "./jj --version" \
+            '```' \
+            "" \
+            "Or download a platform-specific archive from the assets below." \
+            "" \
+            "The git tag for this release points at a commit in this fork; the source that was built is the upstream commit linked above." \
+            > "$RUNNER_TEMP/notes.md"
+
+          # Tag this fork's own commit, NOT the upstream commit being built.
+          # GITHUB_TOKEN is not allowed to create a ref that brings in workflow
+          # files it does not already have, and upstream's .github/workflows tree
+          # differs from this fork's; targeting an upstream commit is rejected
+          # whether the tag is pushed with git or created through the releases
+          # API. $GITHUB_SHA is already in this repository, so tagging it adds no
+          # workflow content and is allowed. The upstream commit that actually
+          # gets built is named in the tag, the title and the release notes.
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Nightly ${DATE} (${SHORT_SHA})" \
+            --prerelease \
+            --notes-file "$RUNNER_TEMP/notes.md"
+
+  build-release:
+    name: Build ${{ matrix.build }}
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [linux-x86_64-musl, linux-aarch64-musl, macos-x86_64, macos-aarch64, win-x86_64, win-aarch64]
+        include:
+        - build: linux-x86_64-musl
+          os: ubuntu-24.04
+          target: x86_64-unknown-linux-musl
+        - build: linux-aarch64-musl
+          os: ubuntu-24.04-arm
+          target: aarch64-unknown-linux-musl
+        - build: macos-x86_64
+          os: macos-15
+          target: x86_64-apple-darwin
+        - build: macos-aarch64
+          os: macos-15
+          target: aarch64-apple-darwin
+        - build: win-x86_64
+          os: windows-2022
+          target: x86_64-pc-windows-msvc
+        - build: win-aarch64
+          os: windows-11-arm
+          target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout upstream source
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      with:
+        # Build the exact upstream commit resolved by create-release, so every
+        # platform builds identical source even if upstream main moves mid-run.
+        repository: jj-vcs/jj
+        ref: ${{ needs.create-release.outputs.sha }}
+        persist-credentials: false
+    - name: Install packages (Ubuntu)
+      if: startsWith(matrix.os, 'ubuntu')
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends xz-utils liblz4-tool musl-tools
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+      with:
+        toolchain: stable
+        target: ${{ matrix.target }}
+    - name: Build release binary
+      shell: bash
+      run: cargo build --target ${{ matrix.target }} --verbose --release
+    - name: Build archive
+      shell: bash
+      run: |
+        outdir="target/${{ matrix.target }}/release"
+        staging="jj-${RELEASE_TAG_NAME}-${{ matrix.target }}"
+        mkdir "$staging"
+        cp {README.md,LICENSE} "$staging/"
+        if [[ "${{ matrix.os }}" == windows* ]]; then
+          cp "$outdir/jj.exe" "$staging/"
+          cd "$staging"
+          7z a "../$staging.zip" .
+          echo "ASSET=$staging.zip" >> $GITHUB_ENV
+        else
+          cp "$outdir/jj" "$staging/"
+          tar czf "$staging.tar.gz" -C "$staging" .
+          echo "ASSET=$staging.tar.gz" >> $GITHUB_ENV
+        fi
+      env:
+        RELEASE_TAG_NAME: ${{ needs.create-release.outputs.tag }}
+    - name: Upload release archive
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        TAG: ${{ needs.create-release.outputs.tag }}
+      run: gh release upload "$TAG" "$ASSET" --clobber
+
+  dotslash:
+    name: Generate and upload DotSlash file
+    needs: [create-release, build-release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Generate DotSlash file
+        uses: facebook/dotslash-publish-release@9c9ec027515c34db9282a09a25a9cab5880b2c52 # v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          config: .github/dotslash-config.json
+          tag: ${{ needs.create-release.outputs.tag }}
